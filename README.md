@@ -1,7 +1,7 @@
 # autoprom-sam
 
 <div align="center">
-  <img src="./resources/network.png" alt="autoprom-sam network architecture" />
+  <img src="./resources/net.png" alt="autoprom-sam network architecture" />
 </div>
 
 This repository contains the code for the paper:
