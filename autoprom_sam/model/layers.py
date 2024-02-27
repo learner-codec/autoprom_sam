@@ -127,11 +127,6 @@ class FPN(nn.Module):
                 torch.nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
                     torch.nn.init.zeros_(m.bias)
-
-
-
-
-
     def forward(self, x):
         features = x
         for i, feature in enumerate(features):
@@ -203,14 +198,7 @@ class FPN(nn.Module):
 
 
         #second global attn index 3-5
-        
-        
-        
-
         #fourth global attn index 9-11
-
-        
-
         return [x1,x2,x3,x4,x5,x6]#256,128,128 256,64,64 256,32,32 256,16,16
 
 class RegressionModel(nn.Module):
@@ -256,10 +244,9 @@ class RegressionModel(nn.Module):
 class ClassificationModel(nn.Module):
     def __init__(self, num_features_in, num_anchors=9, num_classes=80, prior=0.01, feature_size=256):
         super(ClassificationModel,self).__init__()
-
+        self.fatter = CFG.fatter
         self.num_classes = num_classes
         self.num_anchors = num_anchors
-
         self.conv1 = nn.Conv2d(num_features_in, feature_size, kernel_size=3, padding=1)
         self.act1 = nn.ReLU()
 
@@ -271,14 +258,12 @@ class ClassificationModel(nn.Module):
 
         self.conv4 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
         self.act4 = nn.ReLU()
-        ########### This part is used in kidney dataset #################
-        #############################################################################
-        # self.conv5 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        # self.act5 = nn.ReLU()
-        
-        # self.conv6 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
-        # self.act6 = nn.ReLU()
-        #################################################################################
+        if self.fatter:
+            self.conv5 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
+            self.act5 = nn.ReLU()
+            
+            self.conv6 = nn.Conv2d(feature_size, feature_size, kernel_size=3, padding=1)
+            self.act6 = nn.ReLU()
 
         self.output = nn.Conv2d(feature_size, num_anchors * num_classes, kernel_size=3, padding=1)
         self.output_act = nn.Sigmoid()
@@ -297,10 +282,11 @@ class ClassificationModel(nn.Module):
         out = self.act4(out)
         ########### This part is used in kidney dataset #################
         ############################################
-        # out = self.conv5(out)
-        # out = self.act5(out)
-        # out = self.conv6(out)
-        # out = self.act6(out)
+        if self.fatter:
+            out = self.conv5(out)
+            out = self.act5(out)
+            out = self.conv6(out)
+            out = self.act6(out)
         ##################################################
 
         out = self.output(out)

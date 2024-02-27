@@ -139,8 +139,6 @@ class DetNet(nn.Module):
         self.regressionModel.output.bias.data.fill_(0)
 
     def forward(self, img_batch,all_features,annotations=None):
-
-
         ############################################
         features = self.feature_pyramid(all_features)
 
@@ -157,65 +155,65 @@ class DetNet(nn.Module):
         else:
             transformed_anchors = self.regressBoxes(anchors, regression)
             transformed_anchors = self.clipBoxes(transformed_anchors, img_batch)
+            results = []
+            for batch in range(classification.shape[0]):
+                finalResult = [[], [], []]
 
-            finalResult = [[], [], []]
+                finalScores = torch.Tensor([])
+                finalAnchorBoxesIndexes = torch.Tensor([]).long()
+                finalAnchorBoxesCoordinates = torch.Tensor([])
 
-            finalScores = torch.Tensor([])
-            finalAnchorBoxesIndexes = torch.Tensor([]).long()
-            finalAnchorBoxesCoordinates = torch.Tensor([])
-
-            if self.device!='cpu':
-                finalScores = finalScores.cuda()
-                finalAnchorBoxesIndexes = finalAnchorBoxesIndexes.cuda()
-                finalAnchorBoxesCoordinates = finalAnchorBoxesCoordinates.cuda()
-            else:
-                finalScores = finalScores
-                finalAnchorBoxesIndexes = finalAnchorBoxesIndexes
-                finalAnchorBoxesCoordinates = finalAnchorBoxesCoordinates
-            for i in range(classification.shape[2]):
-                scores = torch.squeeze(classification[:, :, i])
-                scores_over_thresh = (scores > 0.05)
-                if scores_over_thresh.sum() == 0:
-                    # no boxes to NMS, just continue
-                    continue
-
-                scores = scores[scores_over_thresh]
-                anchorBoxes = torch.squeeze(transformed_anchors)
-                anchorBoxes = anchorBoxes[scores_over_thresh]
-                anchors_nms_idx = nms(anchorBoxes, scores, 0.5)
-
-                finalResult[0].extend(scores[anchors_nms_idx])
-                finalResult[1].extend(torch.tensor([i] * anchors_nms_idx.shape[0]))
-                finalResult[2].extend(anchorBoxes[anchors_nms_idx])
-
-                finalScores = torch.cat((finalScores, scores[anchors_nms_idx]))
-                finalAnchorBoxesIndexesValue = torch.tensor([i] * anchors_nms_idx.shape[0])
                 if self.device!='cpu':
-                    finalAnchorBoxesIndexesValue = finalAnchorBoxesIndexesValue.cuda()
+                    finalScores = finalScores.cuda()
+                    finalAnchorBoxesIndexes = finalAnchorBoxesIndexes.cuda()
+                    finalAnchorBoxesCoordinates = finalAnchorBoxesCoordinates.cuda()
+                else:
+                    finalScores = finalScores
+                    finalAnchorBoxesIndexes = finalAnchorBoxesIndexes
+                    finalAnchorBoxesCoordinates = finalAnchorBoxesCoordinates
+                for i in range(classification.shape[2]):
+                    scores = torch.squeeze(classification[batch, :, i])
+                    scores_over_thresh = (scores > 0.05)
+                    if scores_over_thresh.sum() == 0:
+                        # no boxes to NMS, just continue
+                        #result.append([torch.Tensor([]).float()]*3)
+                        continue
+                    scores = scores[scores_over_thresh]
+                    anchorBoxes = torch.squeeze(transformed_anchors[batch])
+                    anchorBoxes = anchorBoxes[scores_over_thresh]
+                    anchors_nms_idx = nms(anchorBoxes, scores, 0.5)
+
+                    finalResult[0].extend(scores[anchors_nms_idx])
+                    finalResult[1].extend(torch.tensor([i] * anchors_nms_idx.shape[0]))
+                    finalResult[2].extend(anchorBoxes[anchors_nms_idx])
+
+                    finalScores = torch.cat((finalScores, scores[anchors_nms_idx]))
+                    finalAnchorBoxesIndexesValue = torch.tensor([i] * anchors_nms_idx.shape[0])
+                    if self.device!='cpu':
+                        finalAnchorBoxesIndexesValue = finalAnchorBoxesIndexesValue.cuda()
 
 
-                finalAnchorBoxesIndexes = torch.cat((finalAnchorBoxesIndexes, finalAnchorBoxesIndexesValue))
-                finalAnchorBoxesCoordinates = torch.cat((finalAnchorBoxesCoordinates, anchorBoxes[anchors_nms_idx]))
+                    finalAnchorBoxesIndexes = torch.cat((finalAnchorBoxesIndexes, finalAnchorBoxesIndexesValue))
+                    finalAnchorBoxesCoordinates = torch.cat((finalAnchorBoxesCoordinates, anchorBoxes[anchors_nms_idx]))
+                results.append([finalScores, finalAnchorBoxesIndexes, finalAnchorBoxesCoordinates])
 
-            return [finalScores, finalAnchorBoxesIndexes, finalAnchorBoxesCoordinates]
-        
+            return results
 
 
 
 class MaskHead(nn.Module):
-    def __init__(self, image_embedding_size,image_size,prompt_embed_dim,return_multi_label=True,device='cpu'):
-        super(MaskHead,self).__init__()
+    def __init__(self, image_embedding_size, image_size, prompt_embed_dim, return_multi_label=True, device='cpu'):
+        super(MaskHead, self).__init__()
         self.return_multi_label = return_multi_label
-        self.prompt_encoder =PromptEncoder(
+        self.device = device
+        
+        self.prompt_encoder = PromptEncoder(
             embed_dim=256,
             image_embedding_size=(image_embedding_size, image_embedding_size),
             input_image_size=(image_size, image_size),
             mask_in_chans=16,
         )
-        self.device = device
-        
-
-        self.mask_decoder =MaskDecoder(
+        self.mask_decoder = MaskDecoder(
             num_multimask_outputs=3,
             transformer=TwoWayTransformer(
                 depth=2,
@@ -228,20 +226,16 @@ class MaskHead(nn.Module):
             iou_head_hidden_dim=256,
         )
 
-    def forward(self,batched_input,image_embeddings):
+    def forward(self, batched_input, image_embeddings):
+        outputs = self._process_inputs(batched_input, image_embeddings)
+        return self._process_outputs(outputs)
+
+    def _process_inputs(self, batched_input, image_embeddings):
         outputs = []
         for image_record, curr_embedding in zip(batched_input, image_embeddings):
-            if "point_coords" in image_record:
-                points = (image_record["point_coords"], image_record["point_labels"])
-                print(points)
-            else:
-                points = None
-            with torch.no_grad():
-                sparse_embeddings, dense_embeddings = self.prompt_encoder(
-                    points=points,
-                    boxes=image_record.get("boxes", None),
-                    masks=image_record.get("mask_inputs", None),
-                )
+            points = self._get_points(image_record)
+            sparse_embeddings, dense_embeddings = self._get_embeddings(image_record, points)
+            
             low_res_masks, iou_predictions = self.mask_decoder(
                 image_embeddings=curr_embedding.unsqueeze(0),
                 image_pe=self.prompt_encoder.get_dense_pe(),
@@ -249,66 +243,92 @@ class MaskHead(nn.Module):
                 dense_prompt_embeddings=dense_embeddings,
                 multimask_output=True,
             )
-            # print(low_res_masks.shape)
-            # print(iou_predictions.shape)
-            # print(np.argmax(iou_predictions.cpu(),axis=1))
-            highest_conf_indices = np.argmax(iou_predictions.cpu(),axis=1)
-            low_res_masks = low_res_masks.cpu()
-            filtered_masks = np.empty((len(low_res_masks),1,256,256))
-            for mask_i in range(len(low_res_masks)):
-                filtered_masks[mask_i,0]=low_res_masks[mask_i,highest_conf_indices[mask_i]]
-            low_res_masks = filtered_masks
-            low_res_masks = torch.tensor(low_res_masks)
-            # print(low_res_masks.shape)
+            
+            low_res_masks = self._filter_masks(low_res_masks, iou_predictions)
             outputs.append(
                 {
                     "masks": None,
                     "iou_predictions": iou_predictions,
                     "low_res_logits": low_res_masks,
-                    "labels":image_record.get("labels",None)
+                    "labels": image_record.get("labels", None)
                 }
             )
-        def process(logits):
-            processed = []
-            for i in range(logits.shape[0]):
-                processed.append((logits[i]>0.0))
-            return torch.stack(processed)
-        def process_multi_l(logits,labels):
-            processed = []
-            accumulated_mask = np.zeros((1,256,256),dtype=np.int32)
-            for i in range(logits.shape[0]):
-                curr_mask = (logits[i]>0.0).cpu().numpy()
-                #curr_mask = torch.where(curr_mask==1,labels[i]+1,0) #+1 because 0 will be background
-                accumulated_mask = np.where(curr_mask>0,labels[i]+1,accumulated_mask)
-            if self.device!='cpu':
-                return torch.tensor(accumulated_mask).cuda()
-            else:
-                return torch.tensor(accumulated_mask)
-        # return outputs
-        if not self.return_multi_label:
-            binarized_logits = torch.stack([process(outputs[j]['low_res_logits'])for j in range(len(outputs))], axis=0)
-            return binarized_logits
-        else:
-            multilabel_logits = torch.stack([process_multi_l(outputs[j]['low_res_logits'],outputs[j]["labels"])for j in range(len(outputs))], axis=1)
-            return multilabel_logits
-            
+        return outputs
 
+    def _get_points(self, image_record):
+        if "point_coords" in image_record:
+            return image_record["point_coords"], image_record["point_labels"]
+        return None
+
+    def _get_embeddings(self, image_record, points):
+        with torch.no_grad():
+            return self.prompt_encoder(
+                points=points,
+                boxes=image_record.get("boxes", None),
+                masks=image_record.get("mask_inputs", None),
+            )
+
+    def _filter_masks(self, low_res_masks, iou_predictions):
+        highest_conf_indices = np.argmax(iou_predictions.cpu(), axis=1)
+        low_res_masks = low_res_masks.cpu()
+        filtered_masks = np.empty((len(low_res_masks), 1, 256, 256))
         
-         
-    
+        for mask_i in range(len(low_res_masks)):
+            filtered_masks[mask_i, 0] = low_res_masks[mask_i, highest_conf_indices[mask_i]]
+        
+        return torch.tensor(filtered_masks)
 
+    def _process_outputs(self, outputs):
+        if not self.return_multi_label:
+            return torch.stack([self._process_logits(output['low_res_logits']) for output in outputs], axis=0)
+        else:
+            return torch.stack([self._process_multi_l(output['low_res_logits'], output["labels"]) for output in outputs], axis=1)
+
+    def _process_logits(self, logits):
+        return torch.stack([(logit > 0.0) for logit in logits])
+
+    def _process_multi_l(self, logits, labels):
+        accumulated_mask = np.zeros((1, 256, 256), dtype=np.int32)
+        accumulated_instance = np.zeros((1, 256, 256), dtype=np.int32)
+        
+        for i in range(logits.shape[0]):
+            curr_mask = (logits[i] > 0.0).cpu().numpy()
+            accumulated_mask = np.where(curr_mask > 0, labels[i] + 1, accumulated_mask)
+            accumulated_instance = np.where(curr_mask > 0, i + 1, accumulated_instance)
+        
+        if self.device != 'cpu':
+            return torch.stack([torch.tensor(accumulated_mask).cuda(), torch.tensor(accumulated_instance).cuda()], dim=0)
+        else:
+            return torch.stack([torch.tensor(accumulated_mask), torch.tensor(accumulated_instance)], dim=0)
 
 class E2E(nn.Module):
-    def __init__(self, num_classes, use_dense=True,attach_seg_head = True,train_bbox_decoder=True,train_seg_decoder=False,device="cuda"):
-        super(E2E,self).__init__()
+    """
+    End-to-End model for image processing.
+    """
+
+    def __init__(self, num_classes, use_dense=True, attach_seg_head=True, train_bbox_decoder=True,
+                 train_seg_decoder=False, device="cuda"):
+        super(E2E, self).__init__()
+
+        self.encoder = self._init_encoder()
+        self.device = device
+        self.detector = DetNet(num_classes, use_dense=CFG.use_dense, device=self.device)
+        self.mask_head = self._init_mask_head()
+
+        self.train_bbox_decoder = train_bbox_decoder
+        self.train_seg_decoder = train_seg_decoder
+        self.attach_seg_head = attach_seg_head
         self.features = []
-        prompt_embed_dim = 256
-        image_size = 1024
-        vit_patch_size = 16
-        self.training = False
-        image_embedding_size = image_size // vit_patch_size
-        self.device= device
-        self.encoder = ImageEncoderViT(
+
+        self._register_forward_hooks()
+        self._freeze_encoder()
+        self._freeze_mask_head()
+
+    def _init_encoder(self):
+        """
+        Initialize the image encoder.
+        """
+        return ImageEncoderViT(
             depth=12,
             embed_dim=768,
             img_size=1024,
@@ -322,41 +342,60 @@ class E2E(nn.Module):
             window_size=14,
             out_chans=256,
         )
-        self.detector = DetNet(num_classes,use_dense=CFG.use_dense,device=device)
-        self.mask_head = MaskHead(image_embedding_size=image_embedding_size,image_size=image_size,prompt_embed_dim=prompt_embed_dim)
 
-        self.train_bbox_decoder = train_bbox_decoder
-        self.train_seg_decoder = train_seg_decoder
-        self.attach_seg_head = attach_seg_head
-        self.features = []
-        #register a forward hook
+    def _init_mask_head(self):
+        """
+        Initialize the mask head.
+        """
+        prompt_embed_dim = 256
+        image_size = 1024
+        image_embedding_size = image_size // 16  # vit_patch_size = 16
+        return MaskHead(image_embedding_size=image_embedding_size, image_size=image_size,
+                        prompt_embed_dim=prompt_embed_dim, device=self.device)
+
+    def _register_forward_hooks(self):
+        """
+        Register forward hooks for the encoder blocks.
+        """
         for i, block in enumerate(self.encoder.blocks):
-            block.register_forward_hook(self.hook_fn)
-        ###############################################
+            block.register_forward_hook(self._hook_fn)
 
-        #freeze the encoder. always ""
+    def _hook_fn(self, module, input, output):
+        """
+        Hook function to append output to features.
+        """
+        self.features.append(output)
+
+    def _freeze_encoder(self):
+        """
+        Freeze the encoder parameters.
+        """
         for param in self.encoder.parameters():
             param.requires_grad = False
 
-        #if not train decoder frezze the mask decoder
-        if not self.train_seg_decoder and self.train_bbox_decoder:
-            for name, param in self.mask_head.prompt_encoder.named_parameters():
-                    param.requires_grad = False
-            for name, param in self.mask_head.mask_decoder.named_parameters():
-                    param.requires_grad = False
-        elif not self.train_seg_decoder and not self.train_bbox_decoder:
-            for name, param in self.mask_head.prompt_encoder.named_parameters():
-                    param.requires_grad = False
-            for name, param in self.mask_head.mask_decoder.named_parameters():
-                    param.requires_grad = False
-            for name, param in self.detector.named_parameters():
-                    param.requires_grad = False
-        else:
-            for name, param in self.mask_head.prompt_encoder.named_parameters():
-                    param.requires_grad = False
+    def _freeze_mask_head(self):
+        """
+        Freeze the mask head parameters based on the training configuration.
+        """
+        prompt_encoder_params = self.mask_head.prompt_encoder.named_parameters()
+        mask_decoder_params = self.mask_head.mask_decoder.named_parameters()
+        detector_params = self.detector.named_parameters()
 
-            for name, param in self.detector.named_parameters():
-                    param.requires_grad = False
+        if not self.train_seg_decoder and self.train_bbox_decoder:
+            self._freeze_parameters(prompt_encoder_params, mask_decoder_params)
+        elif not self.train_seg_decoder and not self.train_bbox_decoder:
+            self._freeze_parameters(prompt_encoder_params, mask_decoder_params, detector_params)
+        else:
+            self._freeze_parameters(prompt_encoder_params, detector_params)
+
+    @staticmethod
+    def _freeze_parameters(*params):
+        """
+        Freeze the given parameters.
+        """
+        for parameters in params:
+            for name, param in parameters:
+                param.requires_grad = False
 
     def generate_point_grid(self,box_coord, num_points = 10):
         all_points = []
@@ -369,52 +408,104 @@ class E2E(nn.Module):
             all_points.append(points)
         return all_points
 
-    def hook_fn(self,module, input, output):
-        self.features.append(output)
 
-    def forward(self,inputs):
+    def forward(self, inputs):
         self.features = []
+        img_batch, annotations, batched_input = self._prepare_inputs(inputs)
+
+        with torch.no_grad():
+            out_ = self.encoder(img_batch)
+
+        if self.train_bbox_decoder:
+            self.detector.training = True
+            return self.__forward_bbox(img_batch, self.features, annotations)
+        else:
+            self.detector.training = False
+            return self._process_predictions(img_batch, out_, batched_input)
+
+    def _prepare_inputs(self, inputs):
         annotations = None
         if self.training:
             img_batch, annotations = inputs
             annotations_de = self.process_proposals(copy.copy(annotations))
-            batched_input = [{"image":img_batch[i],"boxes":torch.tensor(annotations_de[i], device=self.device),'original_size':img_batch[i].shape[1:]} for i in range(img_batch.shape[0])]
+            batched_input = self._create_batched_input(img_batch, annotations_de)
         else:
             img_batch = inputs
-            batched_input = [{"image":img_batch[i],'original_size':img_batch[i].shape[1:]} for i in range(img_batch.shape[0])]
-        
+            batched_input = self._create_batched_input(img_batch)
+
         img_batch = torch.stack([x["image"] for x in batched_input], dim=0)
+        return img_batch, annotations, batched_input
 
-        with torch.no_grad():
-            out_ = self.encoder(img_batch)
-        if self.train_bbox_decoder:
-            self.detector.training = True
-            #return the loss
-            return self.__forward_bbox(img_batch,self.features,annotations)
+    def _create_batched_input(self, img_batch, annotations_de=None):
+        if annotations_de is None:
+            return [{"image": img_batch[i], 'original_size': img_batch[i].shape[1:]} for i in range(img_batch.shape[0])]
         else:
-            self.detector.training = False
-            scores, classification, transformed_anchors = self.__forward_bbox(img_batch,self.features)
-            pred_boxes, label_list,scores_list = filter(scores.cpu(), classification.cpu(), transformed_anchors.cpu())
-            if any(scores_list):
-                if self.attach_seg_head and not self.train_seg_decoder:
-                    proposals = self.process_proposals(pred_boxes)
-                    if len(np.array(label_list).shape)==1:
-                        label_list = np.array(label_list)[np.newaxis,:]
-                    batched_input = [{"labels":label_list[i],"boxes":torch.tensor(proposals[i], device=self.device),'original_size':img_batch[i].shape[1:]} for i in range(img_batch.shape[0])]
-                    outputs = self.__forward_seg_head(batched_input,out_)
-                    return pred_boxes, label_list,scores_list,outputs
-                if self.attach_seg_head and self.train_seg_decoder:
-                    outputs = self.__forward_seg_head(batched_input,out_)
-                    return outputs
-                if not self.attach_seg_head:
-                    return pred_boxes, label_list,scores_list 
-            elif not self.attach_seg_head:
-                return  pred_boxes, label_list,scores_list
+            return [{"image": img_batch[i], "boxes": torch.tensor(annotations_de[i], device=self.device), 'original_size': img_batch[i].shape[1:]} for i in range(img_batch.shape[0])]
+
+    def _process_predictions(self, img_batch, out_, batched_input):
+        results = self.__forward_bbox(img_batch, self.features)
+        no_pred, preds_collector, labels_collector, scores_collector = self._filter_results(results)
+
+        if len(no_pred) != img_batch.shape[0]:
+            return self._handle_predictions(img_batch, out_, batched_input, no_pred, preds_collector, labels_collector, scores_collector)
+        elif not self.attach_seg_head:
+            return preds_collector, labels_collector, scores_collector, no_pred
+        else:
+            return preds_collector, labels_collector, scores_collector, None, no_pred
+
+    def _filter_results(self, results):
+        no_pred = []
+        preds_collector = []
+        labels_collector = []
+        scores_collector = []
+
+        for index, result in enumerate(results):
+            pred_boxes, label_list, scores_list = filter(*result)
+            if not any(scores_list):
+                no_pred.append(index)
+                preds_collector.append([[]])
             else:
-                return  pred_boxes, label_list,scores_list,None
+                preds_collector.append(self.process_proposals(pred_boxes))
+
+            if self.attach_seg_head and not self.train_seg_decoder:
+                if len(np.array(label_list).shape) == 1:
+                    label_list = np.array(label_list)[np.newaxis, :]
+            else:
+                preds_collector.append(pred_boxes)
+
+            labels_collector.append(label_list)
+            scores_collector.append(scores_list)
+
+        return no_pred, preds_collector, labels_collector, scores_collector
+
+    def _handle_predictions(self, img_batch, out_, batched_input, no_pred, preds_collector, labels_collector, scores_collector):
+        if self.attach_seg_head:
+            if len(no_pred) > 0:
+                out_ = self._remove_indices(out_, no_pred)
+
+            batched_input = self._create_batched_input_mask(img_batch, preds_collector, labels_collector, no_pred)
+            outputs = self.__forward_seg_head(batched_input, out_)
+
+            if not self.train_seg_decoder:
+                return preds_collector, labels_collector, scores_collector, outputs[0], outputs[1], no_pred
+            else:
+                return outputs
+        else:
+            return preds_collector, labels_collector, scores_collector
+
+    def _create_batched_input_mask(self, img_batch, preds_collector, labels_collector, no_pred):
+        return [{"labels": labels_collector[i][0], "boxes": torch.tensor(preds_collector[i][0], device=self.device), 'original_size': img_batch[i].shape[1:]} for i in range(img_batch.shape[0]) if i not in no_pred]
+
 
         
+    def _remove_indices(self,tensor, indices):
+        # Get the indices to keep
+        keep_indices = [i for i in range(tensor.shape[0]) if i not in indices]
 
+        # Remove the specified indices
+        tensor = torch.index_select(tensor, dim=0, index=torch.tensor(keep_indices).to(self.device))
+
+        return tensor
     def __forward_bbox(self,input,features,annotations=None):
         if annotations is not None:
             return self.detector(input,features,annotations)
@@ -423,6 +514,8 @@ class E2E(nn.Module):
     def __forward_seg_head(self,batched_input,image_embeddings):
          mask_logits = self.mask_head(batched_input,image_embeddings)
          return mask_logits
+    def forward_seg_head(self,batched_input,image_embeddings):
+        return self.__forward_seg_head(batched_input,image_embeddings)
         
     def process_proposals(self,proposals):
         prop = []
